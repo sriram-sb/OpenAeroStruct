@@ -1,4 +1,8 @@
 import numpy as np
+import jax
+import jax.numpy as jnp
+
+from functools import partial
 
 import openmdao.api as om
 
@@ -6,7 +10,6 @@ from openaerostruct.utils.vector_algebra import add_ones_axis
 from openaerostruct.utils.vector_algebra import compute_dot, compute_dot_deriv
 from openaerostruct.utils.vector_algebra import compute_cross, compute_cross_deriv1, compute_cross_deriv2
 from openaerostruct.utils.vector_algebra import compute_norm, compute_norm_deriv
-
 
 tol = 1e-10
 
@@ -21,7 +24,7 @@ def _compute_finite_vortex(r1, r2):
     num = (1.0 / r1_norm + 1.0 / r2_norm) * r1_x_r2
     den = r1_norm * r2_norm + r1_d_r2
 
-    result = np.divide(num, den * 4 * np.pi, out=np.zeros_like(num), where=np.abs(den) > tol)
+    result = np.divide(num, den * 4 * jnp.pi, out=jnp.zeros_like(num), where=jnp.abs(den) > tol)
 
     return result
 
@@ -42,8 +45,8 @@ def _compute_finite_vortex_deriv1(r1, r2, r1_deriv):
     den = r1_norm * r2_norm + r1_d_r2
     den_deriv = r1_norm_deriv * r2_norm + r1_d_r2_deriv
 
-    result = np.divide(
-        num_deriv * den - num * den_deriv, den**2 * 4 * np.pi, out=np.zeros_like(num), where=np.abs(den) > tol
+    result = jnp.divide(
+        num_deriv * den - num * den_deriv, den**2 * 4 * jnp.pi, out=jnp.zeros_like(num), where=jnp.abs(den) > tol
     )
 
     return result
@@ -65,8 +68,8 @@ def _compute_finite_vortex_deriv2(r1, r2, r2_deriv):
     den = r1_norm * r2_norm + r1_d_r2
     den_deriv = r1_norm * r2_norm_deriv + r1_d_r2_deriv
 
-    result = np.divide(
-        num_deriv * den - num * den_deriv, den**2 * 4 * np.pi, out=np.zeros_like(num), where=np.abs(den) > tol
+    result = jnp.divide(
+        num_deriv * den - num * den_deriv, den**2 * 4 * jnp.pi, out=jnp.zeros_like(num), where=jnp.abs(den) > tol
     )
 
     return result
@@ -79,7 +82,7 @@ def _compute_semi_infinite_vortex(u, r):
 
     num = u_x_r
     den = r_norm * (r_norm - u_d_r)
-    return num / den / 4 / np.pi
+    return num / den / 4 / jnp.pi
 
 
 def _compute_semi_infinite_vortex_deriv(u, r, r_deriv):
@@ -98,7 +101,7 @@ def _compute_semi_infinite_vortex_deriv(u, r, r_deriv):
     den = r_norm * (r_norm - u_d_r)
     den_deriv = r_norm_deriv * (r_norm - u_d_r) + r_norm * (r_norm_deriv - u_d_r_deriv)
 
-    return (num_deriv * den - num * den_deriv) / den**2 / 4 / np.pi
+    return (num_deriv * den - num * den_deriv) / den**2 / 4 / jnp.pi
 
 
 class EvalVelMtx(om.ExplicitComponent):
@@ -157,6 +160,12 @@ class EvalVelMtx(om.ExplicitComponent):
         self.options.declare("surfaces", types=list)
         self.options.declare("eval_name", types=str)
         self.options.declare("num_eval_points", types=int)
+        
+        # tell jax to use double precision
+        jax.config.update("jax_enable_x64", True)
+
+        # tell jax that we want derivatives with respect to both inputs of _compute_primal
+        self.deriv_func_jacfwd = jax.jacfwd(self._compute_primal, argnums=[0, 1])
 
     def setup(self):
         surfaces = self.options["surfaces"]
@@ -190,8 +199,8 @@ class EvalVelMtx(om.ExplicitComponent):
                 nx_actual = nx
             if surface["symmetry"]:
                 ny_actual = 2 * ny - 1
-                duplicate_jac_entry_idx_set_1 = np.array([], int)
-                duplicate_jac_entry_idx_set_2 = np.array([], int)
+                duplicate_jac_entry_idx_set_1 = jnp.array([], int)
+                duplicate_jac_entry_idx_set_2 = jnp.array([], int)
                 jac_start_ind_running_total = 0
             else:
                 ny_actual = ny
@@ -200,17 +209,17 @@ class EvalVelMtx(om.ExplicitComponent):
 
             # Get an array of indices representing the number of entries
             # in the vectors array.
-            vectors_indices = np.arange(num_eval_points * nx_actual * ny_actual * 3).reshape(
+            vectors_indices = jnp.arange(num_eval_points * nx_actual * ny_actual * 3).reshape(
                 (num_eval_points, nx_actual, ny_actual, 3)
             )
-            vel_mtx_indices = np.arange(num_eval_points * (nx - 1) * (ny - 1) * 3).reshape(
+            vel_mtx_indices = jnp.arange(num_eval_points * (nx - 1) * (ny - 1) * 3).reshape(
                 (num_eval_points, nx - 1, ny - 1, 3)
             )
-            vel_mtx_idx_expanded = np.arange(num_eval_points * (nx - 1) * (ny - 1) * 3 * 3).reshape(
+            vel_mtx_idx_expanded = jnp.arange(num_eval_points * (nx - 1) * (ny - 1) * 3 * 3).reshape(
                 (num_eval_points, nx - 1, ny - 1, 3, 3)
             )
-            aic_base = np.einsum("ijkl,m->ijklm", vel_mtx_indices, np.ones(3, int))
-            aic_len = np.sum(np.product(aic_base.shape))
+            aic_base = jnp.einsum("ijkl,m->ijklm", vel_mtx_indices, jnp.ones(3, int))
+            aic_len = jnp.sum(np.product(aic_base.shape))
 
             if ground_effect:
                 # mirrored surface along the x mesh direction
@@ -218,8 +227,8 @@ class EvalVelMtx(om.ExplicitComponent):
             else:
                 surfaces_to_compute = [vectors_indices[:, :, :]]
 
-            rows = np.array([], int)
-            cols = np.array([], int)
+            rows = jnp.array([], int)
+            cols = jnp.array([], int)
 
             for surface_to_compute in surfaces_to_compute:
                 inds_A = surface_to_compute[:, 0:-1, 1:, :]
@@ -234,17 +243,17 @@ class EvalVelMtx(om.ExplicitComponent):
                 for ivert, vertex_to_compute in enumerate(vertices_to_compute):
                     jac_dup_set = jac_dup_sets[ivert]
                     if surface["symmetry"]:
-                        rows = np.concatenate([rows, aic_base.flatten()])
-                        cols = np.concatenate(
+                        rows = jnp.concatenate([rows, aic_base.flatten()])
+                        cols = jnp.concatenate(
                             [
                                 cols,
-                                np.einsum(
-                                    "ijkm,l->ijklm", vertex_to_compute[:, :, : ny - 1, :], np.ones(3, int)
+                                jnp.einsum(
+                                    "ijkm,l->ijklm", vertex_to_compute[:, :, : ny - 1, :], jnp.ones(3, int)
                                 ).flatten(),
                             ]
                         )
                         if jac_dup_set == 1:
-                            duplicate_jac_entry_idx_set_1 = np.concatenate(
+                            duplicate_jac_entry_idx_set_1 = jnp.concatenate(
                                 [
                                     duplicate_jac_entry_idx_set_1,
                                     jac_start_ind_running_total + vel_mtx_idx_expanded[:, :, -1, :, :].flatten(),
@@ -252,17 +261,17 @@ class EvalVelMtx(om.ExplicitComponent):
                             )
                         jac_start_ind_running_total += aic_len
 
-                        rows = np.concatenate([rows, aic_base[:, :, ::-1, :].flatten()])
-                        cols = np.concatenate(
+                        rows = jnp.concatenate([rows, aic_base[:, :, ::-1, :].flatten()])
+                        cols = jnp.concatenate(
                             [
                                 cols,
-                                np.einsum(
-                                    "ijkm,l->ijklm", vertex_to_compute[:, :, ny - 1 :, :], np.ones(3, int)
+                                jnp.einsum(
+                                    "ijkm,l->ijklm", vertex_to_compute[:, :, ny - 1 :, :], jnp.ones(3, int)
                                 ).flatten(),
                             ]
                         )
                         if jac_dup_set == 2:
-                            duplicate_jac_entry_idx_set_2 = np.concatenate(
+                            duplicate_jac_entry_idx_set_2 = jnp.concatenate(
                                 [
                                     duplicate_jac_entry_idx_set_2,
                                     jac_start_ind_running_total + vel_mtx_idx_expanded[:, :, 0, :, :].flatten(),
@@ -271,9 +280,9 @@ class EvalVelMtx(om.ExplicitComponent):
                         jac_start_ind_running_total += aic_len
 
                     else:
-                        rows = np.concatenate([rows, aic_base.flatten()])
-                        cols = np.concatenate(
-                            [cols, np.einsum("ijkm,l->ijklm", vertex_to_compute[:, :, :, :], np.ones(3, int)).flatten()]
+                        rows = jnp.concatenate([rows, aic_base.flatten()])
+                        cols = jnp.concatenate(
+                            [cols, jnp.einsum("ijkm,l->ijklm", vertex_to_compute[:, :, :, :], jnp.ones(3, int)).flatten()]
                         )
 
             if surface["symmetry"]:
@@ -283,8 +292,8 @@ class EvalVelMtx(om.ExplicitComponent):
                     duplicate_jac_entry_idx_set_2.copy(),
                 ]
 
-                cols = np.delete(cols, duplicate_jac_entry_idx_set_2)
-                rows = np.delete(rows, duplicate_jac_entry_idx_set_2)
+                cols = jnp.delete(cols, duplicate_jac_entry_idx_set_2)
+                rows = jnp.delete(rows, duplicate_jac_entry_idx_set_2)
 
                 # If this is a right-hand symmetrical wing, we need to flip the "y" indexing
                 right_wing = abs(surface["mesh"][0, 0, 1]) < abs(surface["mesh"][0, -1, 1])
@@ -301,10 +310,12 @@ class EvalVelMtx(om.ExplicitComponent):
             self.declare_partials(vel_mtx_name, "alpha", method="cs")
             self.set_check_partial_options(wrt="alpha", method="fd")
 
-    def compute(self, inputs, outputs):
+    @partial(jax.jit, static_argnums=(0,))
+    def _compute_primal(self, alpha, vectors):
         surfaces = self.options["surfaces"]
         eval_name = self.options["eval_name"]
         num_eval_points = self.options["num_eval_points"]
+        outputs = {}
 
         for surface in surfaces:
             nx = surface["mesh"].shape[0]
@@ -312,16 +323,15 @@ class EvalVelMtx(om.ExplicitComponent):
             name = surface["name"]
             ground_effect = surface.get("groundplane", False)
 
-            alpha = inputs["alpha"][0]
-            cosa = np.cos(alpha * np.pi / 180.0)
-            sina = np.sin(alpha * np.pi / 180.0)
+            alpha = alpha[0].astype(float)
+            cosa = jnp.cos(alpha * jnp.pi / 180.0)
+            sina = jnp.sin(alpha * jnp.pi / 180.0)
 
             if surface["symmetry"]:
-                u = np.einsum("ijk,l->ijkl", np.ones((num_eval_points, 1, 2 * (ny - 1))), np.array([cosa, 0, sina]))
+                u = jnp.einsum("ijk,l->ijkl", jnp.ones((num_eval_points, 1, 2 * (ny - 1))), jnp.array([cosa, 0, sina]))
             else:
-                u = np.einsum("ijk,l->ijkl", np.ones((num_eval_points, 1, ny - 1)), np.array([cosa, 0, sina]))
+                u = jnp.einsum("ijk,l->ijkl", jnp.ones((num_eval_points, 1, ny - 1)), jnp.array([cosa, 0, sina]))
 
-            vectors_name = "{}_{}_vectors".format(name, eval_name)
             vel_mtx_name = "{}_{}_vel_mtx".format(name, eval_name)
 
             outputs[vel_mtx_name] = 0.0
@@ -334,10 +344,10 @@ class EvalVelMtx(om.ExplicitComponent):
 
             if ground_effect:
                 # mirrored surface along the x mesh direction
-                surfaces_to_compute = [inputs[vectors_name][:, :nx, :, :], inputs[vectors_name][:, nx:, :, :]]
+                surfaces_to_compute = [vectors[:, :nx, :, :], vectors[:, nx:, :, :]]
                 vortex_mults = [1.0, -1.0]
             else:
-                surfaces_to_compute = [inputs[vectors_name]]
+                surfaces_to_compute = [vectors]
                 vortex_mults = [1.0]
 
             for i_surf, surface_to_compute in enumerate(surfaces_to_compute):
@@ -396,6 +406,20 @@ class EvalVelMtx(om.ExplicitComponent):
                 right_wing = abs(surface["mesh"][0, 0, 1]) < abs(surface["mesh"][0, -1, 1])
                 if right_wing:
                     outputs[vel_mtx_name] = outputs[vel_mtx_name][:, :, ::-1, :]
+
+    def compute(self, inputs, outputs):
+        primal_outputs = self._compute_primal(*inputs.values())
+        surfaces = self.options["surfaces"]
+        eval_name = self.options["eval_name"]
+        outputs = {}
+
+        for surface_idx, surface in enumerate(surfaces):
+            name = surface["name"]
+            vectors_name = "{}_{}_vectors".format(name, eval_name)
+            vel_mtx_name = "{}_{}_vel_mtx".format(name, eval_name)
+            print(inputs[vectors_name].shape())
+            outputs[vel_mtx_name] = primal_outputs[surface_idx]
+
 
     def compute_partials(self, inputs, partials):
         surfaces = self.options["surfaces"]
