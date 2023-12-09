@@ -1,12 +1,12 @@
 import numpy as np
-
+import jax.numpy as jnp
 
 def get_array_indices(*shape):
-    return np.arange(np.prod(shape)).reshape(shape)
+    return jnp.arange(jnp.prod(shape)).reshape(shape)
 
 
 def add_ones_axis(array):
-    return np.einsum("...,l->...l", array, np.ones(3))
+    return jnp.einsum("...,l->...l", array, jnp.ones(3))
 
 
 def compute_dot(array1, array2):
@@ -20,7 +20,7 @@ def compute_dot(array1, array2):
     array2 : numpy array[..., 3]
         Second argument in the dot product. The dot product axis is the last one.
     """
-    return np.einsum("...,i->...i", np.einsum("...i,...i->...", array1, array2), np.ones(3))
+    return jnp.einsum("...,i->...i", jnp.einsum("...i,...i->...", array1, array2), jnp.ones(3))
 
 
 def compute_dot_deriv(array, deriv_array):
@@ -52,7 +52,7 @@ def compute_cross(array1, array2):
     array2 : numpy array[..., 3]
         Second argument in the cross product (order matters). The cross product axis is the last one.
     """
-    return np.cross(array1, array2, axis=-1)
+    return jnp.cross(array1, array2, axis=-1)
 
 
 def compute_cross_deriv1(deriv_array, array):
@@ -98,7 +98,7 @@ def compute_norm(array):
     array : numpy array[..., 3]
         Array we are taking the norm of in the last axis.
     """
-    return np.einsum("...,k->...k", np.sum(array**2, axis=-1) ** 0.5, np.ones(3))
+    return jnp.einsum("...,k->...k", jnp.sum(array**2, axis=-1) ** 0.5, jnp.ones(3))
 
 
 def compute_norm_deriv(array, deriv_array):

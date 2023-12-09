@@ -24,7 +24,7 @@ def _compute_finite_vortex(r1, r2):
     num = (1.0 / r1_norm + 1.0 / r2_norm) * r1_x_r2
     den = r1_norm * r2_norm + r1_d_r2
 
-    result = np.divide(num, den * 4 * jnp.pi, out=jnp.zeros_like(num), where=jnp.abs(den) > tol)
+    result = jnp.where(jnp.abs(den) > tol, jnp.true_divide(num, den * 4 * jnp.pi), 0.0)
 
     return result
 
@@ -45,9 +45,7 @@ def _compute_finite_vortex_deriv1(r1, r2, r1_deriv):
     den = r1_norm * r2_norm + r1_d_r2
     den_deriv = r1_norm_deriv * r2_norm + r1_d_r2_deriv
 
-    result = jnp.divide(
-        num_deriv * den - num * den_deriv, den**2 * 4 * jnp.pi, out=jnp.zeros_like(num), where=jnp.abs(den) > tol
-    )
+    result = jnp.where(jnp.abs(den) > tol, jnp.true_divide(num_deriv * den - num * den_deriv, den**2 * 4 * jnp.pi), 0.0)
 
     return result
 
@@ -68,9 +66,7 @@ def _compute_finite_vortex_deriv2(r1, r2, r2_deriv):
     den = r1_norm * r2_norm + r1_d_r2
     den_deriv = r1_norm * r2_norm_deriv + r1_d_r2_deriv
 
-    result = jnp.divide(
-        num_deriv * den - num * den_deriv, den**2 * 4 * jnp.pi, out=jnp.zeros_like(num), where=jnp.abs(den) > tol
-    )
+    result = jnp.where(jnp.abs(den) > tol, jnp.true_divide(num_deriv * den - num * den_deriv, den**2 * 4 * jnp.pi), 0.0)
 
     return result
 
@@ -164,8 +160,8 @@ class EvalVelMtx(om.ExplicitComponent):
         # tell jax to use double precision
         jax.config.update("jax_enable_x64", True)
 
-        # tell jax that we want derivatives with respect to both inputs of _compute_primal
-        self.deriv_func_jacfwd = jax.jacfwd(self._compute_primal, argnums=[0, 1])
+        # tell jax which inputs to take the derivatives with respect to
+        self.deriv_func_jacfwd = jax.jacfwd(self._compute_primal, argnums=[1])
 
     def setup(self):
         surfaces = self.options["surfaces"]
@@ -395,121 +391,67 @@ class EvalVelMtx(om.ExplicitComponent):
                     res2 += result2[:, :, ny - 1 :, :][:, :, ::-1, :]
                     res3 = result3[:, :, : ny - 1, :]
                     res3 += result3[:, :, ny - 1 :, :][:, :, ::-1, :]
-                    outputs[vel_mtx_name][:, -1:, :, :] += vortex_mult * (res1 - res2 + res3)
+                    outputs[vel_mtx_name].at[:, -1:, :, :].add(vortex_mult * (res1 - res2 + res3))
                 else:
-                    outputs[vel_mtx_name][:, -1:, :, :] += vortex_mult * result1
-                    outputs[vel_mtx_name][:, -1:, :, :] -= vortex_mult * result2
-                    outputs[vel_mtx_name][:, -1:, :, :] += vortex_mult * result3
+                    outputs[vel_mtx_name].at[:, -1:, :, :].add(vortex_mult * result1)
+                    outputs[vel_mtx_name].at[:, -1:, :, :].add(-1 * vortex_mult * result2)
+                    outputs[vel_mtx_name].at[:, -1:, :, :].add(vortex_mult * result3)
 
             if surface["symmetry"]:
                 # If this is a right-hand symmetrical wing, we need to flip the "y" indexing
                 right_wing = abs(surface["mesh"][0, 0, 1]) < abs(surface["mesh"][0, -1, 1])
                 if right_wing:
                     outputs[vel_mtx_name] = outputs[vel_mtx_name][:, :, ::-1, :]
+        
+        results = []
+
+        if surface["symmetry"]:
+            ny_actual = 2 * ny - 1
+        else:
+            ny_actual = ny
+            
+        # return derivatives as a tuple, in the order they were added
+        while len(outputs.values()) != 0:
+            results.append(outputs.popitem()[1])
+            print(results[-1].shape)
+            print("desired: (", 4, num_eval_points, nx-1, ny_actual - 1, 3, 3, ")")
+            print(results)
+        
+        return tuple(results)
 
     def compute(self, inputs, outputs):
         primal_outputs = self._compute_primal(*inputs.values())
         surfaces = self.options["surfaces"]
         eval_name = self.options["eval_name"]
-        outputs = {}
 
         for surface_idx, surface in enumerate(surfaces):
             name = surface["name"]
-            vectors_name = "{}_{}_vectors".format(name, eval_name)
             vel_mtx_name = "{}_{}_vel_mtx".format(name, eval_name)
-            print(inputs[vectors_name].shape())
             outputs[vel_mtx_name] = primal_outputs[surface_idx]
 
+    @partial(jax.jit, static_argnums=(0,))
+    def _compute_partials_jacfwd(self, alpha, vectors):
+        return self.deriv_func_jacfwd(alpha, vectors)
 
     def compute_partials(self, inputs, partials):
         surfaces = self.options["surfaces"]
         eval_name = self.options["eval_name"]
-        num_eval_points = self.options["num_eval_points"]
-        for surface in surfaces:
-            nx = surface["mesh"].shape[0]
-            ny = surface["mesh"].shape[1]
+        derivs = self._compute_partials_jacfwd(*inputs.values())
+        print(derivs[0][0])
+        # print(derivs[0][0].flatten())
+
+        for surface_idx, surface in enumerate(surfaces):
             name = surface["name"]
-            ground_effect = surface.get("groundplane", False)
 
             vectors_name = "{}_{}_vectors".format(name, eval_name)
             vel_mtx_name = "{}_{}_vel_mtx".format(name, eval_name)
 
-            alpha = inputs["alpha"][0]
-            cosa = np.cos(alpha * np.pi / 180.0)
-            sina = np.sin(alpha * np.pi / 180.0)
+            assembled_derivs = derivs[surface_idx][0]
 
-            if ground_effect:
-                # mirrored surface along the x mesh direction
-                surfaces_to_compute = [inputs[vectors_name][:, :nx, :, :], inputs[vectors_name][:, nx:, :, :]]
-                vortex_mults = [1.0, -1.0]
-            else:
-                surfaces_to_compute = [inputs[vectors_name]]
-                vortex_mults = [1.0]
-
-            if surface["symmetry"]:
-                ny_actual = 2 * ny - 1
-            else:
-                ny_actual = ny
-
-            assembled_derivs = np.array([], int)
-
-            for i_surf, surface_to_compute in enumerate(surfaces_to_compute):
-                # vortex vertices:
-                #         A ----- B
-                #         |       |
-                #         |       |
-                #         D-------C
-                #
-                vortex_mult = vortex_mults[i_surf]
-
-                u = np.einsum("ijk,l->ijkl", np.ones((num_eval_points, 1, ny_actual - 1)), np.array([cosa, 0, sina]))
-
-                deriv_array = np.einsum("...,ij->...ij", np.ones((num_eval_points, nx - 1, ny_actual - 1)), np.eye(3))
-                trailing_array = np.einsum("...,ij->...ij", np.ones((num_eval_points, 1, ny_actual - 1)), np.eye(3))
-
-                derivs = np.zeros((4, num_eval_points, nx - 1, ny_actual - 1, 3, 3))
-
-                vert_A = surface_to_compute[:, 0:-1, 1:, :]
-                vert_B = surface_to_compute[:, 0:-1, 0:-1, :]
-                vert_C = surface_to_compute[:, 1:, 0:-1, :]
-                vert_D = surface_to_compute[:, 1:, 1:, :]
-
-                # front vortex
-                derivs[0, :, :, :, :] += _compute_finite_vortex_deriv1(vert_A, vert_B, deriv_array)
-                derivs[1, :, :, :, :] += _compute_finite_vortex_deriv2(vert_A, vert_B, deriv_array)
-
-                # right vortex
-                derivs[1, :, :, :, :] += _compute_finite_vortex_deriv1(vert_B, vert_C, deriv_array)
-                derivs[2, :, :, :, :] += _compute_finite_vortex_deriv2(vert_B, vert_C, deriv_array)
-
-                # rear vortex
-                derivs[2, :, :, :, :] += _compute_finite_vortex_deriv1(vert_C, vert_D, deriv_array)
-                derivs[3, :, :, :, :] += _compute_finite_vortex_deriv2(vert_C, vert_D, deriv_array)
-
-                # left vortex
-                derivs[3, :, :, :, :] += _compute_finite_vortex_deriv1(vert_D, vert_A, deriv_array)
-                derivs[0, :, :, :, :] += _compute_finite_vortex_deriv2(vert_D, vert_A, deriv_array)
-
-                # ----------------- last row -----------------
-                vert_D_last = vert_D[:, -1:, :, :]
-                vert_C_last = vert_C[:, -1:, :, :]
-
-                derivs[3, :, -1:, :, :] += _compute_finite_vortex_deriv1(vert_D_last, vert_C_last, trailing_array)
-                derivs[2, :, -1:, :, :] += _compute_finite_vortex_deriv2(vert_D_last, vert_C_last, trailing_array)
-                derivs[3, :, -1:, :, :] -= _compute_semi_infinite_vortex_deriv(u, vert_D_last, trailing_array)
-                derivs[2, :, -1:, :, :] += _compute_semi_infinite_vortex_deriv(u, vert_C_last, trailing_array)
-
-                derivs = derivs * vortex_mult
-                for i in range(4):
-                    if surface["symmetry"]:
-                        assembled_derivs = np.concatenate([assembled_derivs, derivs[i, :, :, : ny - 1, :].flatten()])
-                        assembled_derivs = np.concatenate([assembled_derivs, derivs[i, :, :, ny - 1 :, :].flatten()])
-                    else:
-                        assembled_derivs = np.concatenate([assembled_derivs, derivs[i, :, :, :].flatten()])
-
-            if surface["symmetry"]:
-                # now, need to check for duplicate entries and combine / delete
-                first_repeated_index, second_repeated_index = self.surface_indices_repeated[name]
-                assembled_derivs[first_repeated_index] += assembled_derivs[second_repeated_index].copy()
-                assembled_derivs = np.delete(assembled_derivs, second_repeated_index)
-            partials[vel_mtx_name, vectors_name] = assembled_derivs
+            # if surface["symmetry"]:
+            #     # now, need to check for duplicate entries and combine / delete
+            #     first_repeated_index, second_repeated_index = self.surface_indices_repeated[name]
+            #     assembled_derivs.at[first_repeated_index].add(assembled_derivs[second_repeated_index].copy())
+            #     assembled_derivs = jnp.delete(assembled_derivs, second_repeated_index)
+            
+            partials[vel_mtx_name, vectors_name] = assembled_derivs.flatten()
