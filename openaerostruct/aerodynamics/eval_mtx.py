@@ -161,7 +161,7 @@ class EvalVelMtx(om.ExplicitComponent):
         jax.config.update("jax_enable_x64", True)
 
         # tell jax which inputs to take the derivatives with respect to
-        self.deriv_func_jacfwd = jax.jacfwd(self._compute_primal, argnums=[1])
+        self.deriv_func_jax = lambda alpha, vectors: jax.vjp(self._compute_primal, alpha, vectors)
 
     def setup(self):
         surfaces = self.options["surfaces"]
@@ -413,11 +413,12 @@ class EvalVelMtx(om.ExplicitComponent):
         # return derivatives as a tuple, in the order they were added
         while len(outputs.values()) != 0:
             results.append(outputs.popitem()[1])
-            print(results[-1].shape)
-            print("desired: (", 4, num_eval_points, nx-1, ny_actual - 1, 3, 3, ")")
-            print(results)
+            # print(eval_name)
+            # print(vectors.shape)
+            # print(results[-1].shape)
+            # print("desired: (", 4, num_eval_points, nx-1, ny_actual - 1, 3, 3, ")")
         
-        return tuple(results)
+        return results[0]
 
     def compute(self, inputs, outputs):
         primal_outputs = self._compute_primal(*inputs.values())
@@ -430,15 +431,36 @@ class EvalVelMtx(om.ExplicitComponent):
             outputs[vel_mtx_name] = primal_outputs[surface_idx]
 
     @partial(jax.jit, static_argnums=(0,))
-    def _compute_partials_jacfwd(self, alpha, vectors):
-        return self.deriv_func_jacfwd(alpha, vectors)
+    def _compute_partials_jax(self, alpha, vectors):
+        _, deriv_function = self.deriv_func_jax(alpha, vectors)
+        num_eval_points = self.options["num_eval_points"]
+
+        # assuming only one surface for the time being
+        for surface in self.options["surfaces"]:
+            mesh = surface["mesh"]
+            nx = mesh.shape[0]
+            ny = mesh.shape[1]  
+            shape = (num_eval_points, nx-1, ny-1, 3)
+        
+        I0 = np.zeros(shape=(shape[2], 3));
+        I0[:, 0] = 1
+        print(I0)
+        I1 = np.roll(I0, 1); I2 = np.roll(I0, 2)
+        cc0 = np.zeros(shape=shape)
+        for j in range(shape[0]):
+            for i in range(shape[1]): cc0[j, i, :, :] = I0
+        cc1 = np.roll(cc0, 1, axis=-1); cc2 = np.roll(cc0, 2, axis=-1)
+
+        # vector to multiply jacobian with
+        v = cc0
+        return deriv_function(v)
 
     def compute_partials(self, inputs, partials):
         surfaces = self.options["surfaces"]
         eval_name = self.options["eval_name"]
-        derivs = self._compute_partials_jacfwd(*inputs.values())
-        print(derivs[0][0])
-        # print(derivs[0][0].flatten())
+        derivs = self._compute_partials_jax(*inputs.values())
+
+        print(derivs[1])
 
         for surface_idx, surface in enumerate(surfaces):
             name = surface["name"]
