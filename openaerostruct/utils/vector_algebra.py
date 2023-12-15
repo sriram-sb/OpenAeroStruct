@@ -2,11 +2,11 @@ import numpy as np
 import jax.numpy as jnp
 
 def get_array_indices(*shape):
-    return jnp.arange(jnp.prod(shape)).reshape(shape)
+    return np.arange(np.prod(shape)).reshape(shape)
 
 
 def add_ones_axis(array):
-    return jnp.einsum("...,l->...l", array, jnp.ones(3))
+    return np.einsum("...,l->...l", array, np.ones(3))
 
 
 def compute_dot(array1, array2):
